@@ -30,6 +30,8 @@ class Layer(LoggingModule):
             cfg.num_kv_heads,
             cfg.max_batch_size,
             cfg.max_seq_len,
+            cfg.fractal_split,
+            cfg.fractal_delay,
             cfg.dropout_rate,
             cfg.device
         )
@@ -49,10 +51,12 @@ class Layer(LoggingModule):
             cfg.norm_affine, 
             cfg.norm_bias, 
             cfg.eps
-        )
+        ) 
+        # ensures mlp_hidden_mult maintains the same parameter count if gated == true
+        mult = cfg.mlp_hidden_mult * 2/3 if cfg.mlp_gated else cfg.mlp_hidden_mult
         self.mlp = MLP(
             cfg.dim,
-            int(cfg.mlp_hidden_mult * cfg.dim),
+            int(cfg.dim * mult),
             cfg.dim,
             cfg.mlp_nonlinearity,
             cfg.mlp_gated,
