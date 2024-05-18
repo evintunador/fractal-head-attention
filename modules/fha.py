@@ -51,8 +51,6 @@ class FHA(LoggingModule):
         'fractal heads are too small.\neither raise head_dim or fractal_delay or lower fractal_split or num_q_heads'
         # Calculate the total number of fractal heads
         self.num_fractal_heads = sum(self.fractal_split ** i for i in range(self.num_q_heads))
-        # Preallocate a tensor for holding all fractalized heads
-        self.preallocated_tensor = nn.Parameter(torch.zeros(1, max_seq_len, self.num_fractal_heads, head_dim),requires_grad=False)
     
     @log_io
     def forward(
@@ -90,17 +88,24 @@ class FHA(LoggingModule):
         if self.num_kv_heads != self.num_q_heads:
             keys, values = self.match_headcount(keys, values) # (bs, cache_len + seq_len, num_q_heads, head_dim)
 
-        q = self.fractalize_heads_tensor(queries).transpose(1,2)
-        k = self.fractalize_heads_tensor(keys).transpose(1,2)
-        v = self.fractalize_heads_tensor(values).transpose(1,2)
+        q_list = self.fractalize_heads(queries)
+        k_list = self.fractalize_heads(keys)
+        v_list = self.fractalize_heads(values)
         
-        logits = self.attend(q, k, training)
+        logits = torch.concat([self.attend(q_list[i], k_list[i], training) for i in range(self.num_q_heads)], dim=1)
         
         if mask is not None:
             logits = logits + mask  # (bs, num_fractal_heads, seq_len, cache_len + seq_len)
             
-        scores = self.calc_output(logits, v, training)
-        scores = self.desparsify_scores(scores)
+        scores_list = [
+            self.calc_output(
+                logits[:,self.fractal_split**i - 1:self.fractal_split**i - 1 + self.fractal_split**i,...],
+                v_list[i], 
+                training
+            ) 
+            for i in range(self.num_q_heads)
+        ]
+        scores = torch.concat(scores_list, dim=2)
         
         output = self.Wo(scores)
         if training: output = F.dropout(output, self.dropout_rate)
@@ -145,32 +150,17 @@ class FHA(LoggingModule):
         return keys, values
 
     @log_io
-    def fractalize_heads_tensor(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        the key function of this experiment
-        iterates through each of the original q, k, & v heads and splits them into smaller heads according to fractal_split
-        then places them into our preallocated tensor full of zeros
-        
-        although these zeros take up a bit of memory and flops, doing it this way allows us to treat 
-        most of the remaining operations as if we were doing regular multi-head-attention 
-
-        x: Tensor of shape (batch_size, seq_len, num_q_heads, head_dim)
-        expanded_tensor: Tensor of shape (batch_size, seq_len, num_fractal_heads, head_dim) where most entries are 0
-        """
-        batch_size, seq_len, _, _ = x.shape
-        # Expand the preallocated tensor to the current batch size
-        expanded_tensor = self.preallocated_tensor.repeat(batch_size, 1, 1, 1)[:,:seq_len,...]
-        
-        head_index = 0
-        for i in range(self.num_q_heads):
-            split_size = self.fractal_split ** i
-            new_head_dim = self.head_dim // split_size
-            
-            for j in range(split_size):
-                expanded_tensor[:, :, head_index, :new_head_dim] = x[:, :, i, j*new_head_dim:(j+1)*new_head_dim]
-                head_index += 1
-        
-        return expanded_tensor
+    def fractalize_heads(self, x: torch.Tensor) -> List[torch.Tensor]:
+        x_list = [
+            x[...,i,:].reshape(
+                x.shape[0], 
+                x.shape[1], 
+                self.fractal_split ** i, 
+                self.head_dim // self.fractal_split ** i
+            ).transpose(1,2)
+            for i in range(self.num_q_heads)
+        ]
+        return x_list
 
     @log_io
     def attend(
@@ -194,25 +184,3 @@ class FHA(LoggingModule):
         if training: scores = F.dropout(scores, self.dropout_rate)
         output = scores @ values # [batch_size, n_heads, seq_len, head_dim]
         return output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1) # [batch_size, seq_len, n_heads * head_dim]
-
-    @log_io
-    def desparsify_scores(
-        self,
-        scores: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        turns scores from a very sparse tensor of mostly zeros shape (batch_size, seq_len, head_dim * num_fractal_heads)
-        back into a regular (batch_size, seq_len, head_dim * num_q_heads) that's compatible with self.Wo
-        """
-        # so here was my scratch work when making the below function attempting to remove all the zeros from scores
-        # 32, 16, 16, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4 <- each head size
-        # 32//(2**f(i)) <- i'll calculate head sizes using that, but idk what f(i) should be
-        # 0,  1,  2,  3, 4, 5, 6, 7, 8, 9,10,11,12,13,14 <- i
-        # 0,  1,  1,  2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3 <- f(i)
-        # looks like that should be math.floor(math.log2(i + 1))
-        
-        scores = torch.concat(
-            [scores[:,:, i * self.head_dim:i * self.head_dim + (32 // (2 ** math.floor(math.log2(i + 1))))] for i in range(self.num_fractal_heads)], 
-            dim=2
-        )
-        return scores

@@ -20,22 +20,22 @@ class ModelConfig:
     # ^ that number does not include the three tokens bos, eos, and pad
 
     # Residual Layers
-    num_layers: int = 8 # small models should err on the side of many many layers at the expense of attention & mlp sizes
+    num_layers: int = 4 # small models should err on the side of many many layers at the expense of attention & mlp sizes
     second_resid_norm: bool = False # True adds an extra Norm after the attn & MLP, like in Grok. Only recommended if using RMSNorm
     
     # Multi-Layer Perceptrion
-    mlp_hidden_mult: int = 4 # if mlp_gated = True then this has 1.5x the parameters of if mlp_gated = False
+    mlp_hidden_mult: int = 8 # if mlp_gated = True then this has 1.5x the parameters of if mlp_gated = False
     mlp_bias: bool = False # whether to use bias weights. Llama3 does not and I'm partial to their choice
     mlp_nonlinearity: str = 'SiLU' # options are 'GeLU', 'SiLU', and 'ReLU'(not recommended)
     mlp_gated: bool = True # Turns SiLU into SwiGLU, GeLU into GeGLU, etc
     # ^ if gated == True, mlp_hidden_mult will automatically adjust to maintain parameter count
 
     # Multi-Query Attention
-    num_q_heads: int = 4 # `num_q_heads % num_kv_heads == 0` must be true
+    num_q_heads: int = 3 # `num_q_heads % num_kv_heads == 0` must be true
     num_kv_heads: int = 1 # set =num_q_heads to revert to regular multi-head attention (not recommended)
-    head_dim: int = 32 # most common choices are powers of 2 up to 256 (usually 128) bc those are what works with flash attention (which we don't use)
+    head_dim: int = 64 # most common choices are powers of 2 up to 256 (usually 128) bc those are what works with flash attention (which we don't use)
     theta: float = 10_000 # 10_000 is the most common choice. Llama3 uses 50_000
-    max_seq_len: int = 128 # 512 is the most my 8gb of ram can handle
+    max_seq_len: int = 512 # 512 is the most my 8gb of ram can handle
 
     # fractal-head attention
     fractal_split: int = 2 # how heads to split into as we iterate through each original head
@@ -67,9 +67,9 @@ class TrainConfig:
     batch_size: int = 32
     
     # total number of batches to run over the course of training
-    max_iters: int = 5 # i recommend at least 1_000
+    max_iters: int = 2_000 # i recommend at least 1_000
     # how often to print out an update on how training is going
-    eval_interval: int = 5 # doing this too often slows things down hella but also gives detailed log data
+    eval_interval: int = max_iters // 100 # doing this too often slows things down hella but also gives detailed log data
     # how many samples to take at each evaluation. more means a more accurate loss/perplexity calculation
     eval_samples: int = 1 # this number can slow things down. each sample is almost like doing an extra training iteration
     # how often to save a model checkpoint
@@ -78,10 +78,10 @@ class TrainConfig:
     ### to visualize the learning rate schedule you define here, see cell 7 of training.ipynb
 
     # Initial learning rate to start from during the warmup
-    lr_init: float = 0.0
+    lr_init: float = 1e-6
     # Maximum and minimum learning rates during annealing
     lr_max: float = 1e-1
-    lr_min: float = 1e-4
+    lr_min: float = 1e-3
     # if you'd like a flat learning rate, set lr_init = lr_min = lr_max and ignore the variables below
     
     # number of iterations for a linear warmup from lr_min to lr_max
@@ -100,80 +100,3 @@ class TrainConfig:
     def T_0(self): # I DO NOT RECOMMEND EDITING THIS
         middle_section = self.max_iters - self.warmup_iters - self.final_flat_iters
         return middle_section / sum(self.T_mult ** i for i in range(self.num_restarts+1))
-
-
-
-
-
-
-
-
-
-@dataclass
-class HyperParameterSearchConfig:
-    """
-    NOT CURRENTLY FUNCTIONAL; STILL IN PLANNING STAGE
-    
-    Determines the hyperparameters to be tested and the order to test them
-    The first entry of each list will be tried first
-
-    Keep in mind before defining all your values that these take A LOT of time to run as your lists get even slightly longer.
-    To find out how many training runs are going to be *attempted* (they will be skipped over if ram usage is too high),
-    what you do is take the length of all the lists and multiply those lengths together. 
-    """
-
-    ### ModelConfig
-    # general
-    dim = [128, 64]
-    vocab_len = [1024]
-    dropout_rate = [0.1]
-
-    # Residual Layers
-    num_layers = [12, 8]
-    pre_connect_dropout = [False]
-    second_resid_norm = [False]
-    
-    # MLP
-    mlp_hidden_mult = [4, 2]
-    mlp_bias = [False] 
-    mlp_nonlinearity = ['GeLU']
-    mlp_gated = [True]
-
-    # attention
-    num_q_heads = [12, 8, 4]
-    num_kv_heads = [1] # need to add a conditional that prevents use of num_q_heads < num_kv_heads
-    head_dim = [32, 16] 
-    theta = [10_000]
-    max_seq_len = [512] # using a longer seq_len isn't really feasible and using a shorter one is kinda useless
-
-    # normalization
-    scale_first_resid = [True]
-    norm_type = ['RMSNorm']
-    norm_affine = [True]
-    norm_bias = [True] # only actually does anything if norm_affine == True
-
-    ### TrainConfig
-    weight_decay = [0.01]
-    batch_size = [32, 24, 16] # need to assert only try a lower batch size for models that ran out of ram at higher batch sizes
-    max_iters = [1000]
-    
-    # learning rate scheduling
-    lr_max = [1e-2]
-    lr_min = [1e-6, 1e-4, 1e-2] # need to assert if lr_min == lr_max then don't iterate over any of the below
-    def warmup_iters(self): 
-        return [int(self.max_iters * i) for i in [0.05]]
-    def final_flat_iters(self):
-        return [int(self.max_iters * i) for i in [0.1, 0.3]]
-    anneal_type = ['cos']
-    num_restarts = [0, 3] # need to assert if num_restarts == 0 then don't iterate over T_mult
-    T_mult = [1, 2] 
-
-    # 2*2*2*3*2 + 2*2*2*3*2*2*2 + 2*2*2*3*2*2*2*2 = 624 models
-    # every time you hit a hp that makes downstreap hp's useless, you get to add & then continue on with the following multiple
-    # need to make a function that calculates this number
-
-    ### Hyperparameter Testing Order
-    # this determines which lists will be iterated first. put hyperparameters that you're more interested in learning about in the front.
-    # i recommend putting batch size last since the purpose of testing a smaller batch size is really just to try and fit bigger models into ram
-    #def order(self):
-        #return [] # need to fill in

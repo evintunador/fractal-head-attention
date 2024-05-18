@@ -30,8 +30,7 @@ class Layer(LoggingModule):
             cfg.num_kv_heads,
             cfg.max_batch_size,
             cfg.max_seq_len,
-            cfg.fractal_split,
-            cfg.fractal_delay,
+            cfg.fractal_split,\
             cfg.dropout_rate,
             cfg.device
         )
